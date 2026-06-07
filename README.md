@@ -42,6 +42,8 @@ It indexes your drives on first install, keeps the index live with a file system
 
 ![LocaFetch search results with filters](assets/preview-results.png)
 
+![LocaFetch settings](assets/preview-settings.png)
+
 ---
 
 ## Installation
