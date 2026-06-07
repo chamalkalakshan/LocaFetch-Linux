@@ -54,17 +54,21 @@ export default function SearchView({ onSettings, filter, onFilterChange }: Props
     return SEARCH + SEP + FILTER_BAR + PAD + rows * ROW + STATUS;
   }
 
-  // Focus input on mount and every time the window is shown
+  // Clear and focus when window is shown (Ctrl+Space); just focus when regaining focus
   useEffect(() => {
     inputRef.current?.focus();
     const win = getCurrentWindow();
-    let unlisten: (() => void) | undefined;
-    win.listen("tauri://focus", () => {
+    let unlistenShow: (() => void) | undefined;
+    let unlistenFocus: (() => void) | undefined;
+    win.listen("search-shown", () => {
       setQuery("");
       setResults([]);
       setTimeout(() => inputRef.current?.focus(), 30);
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
+    }).then((fn) => { unlistenShow = fn; });
+    win.listen("tauri://focus", () => {
+      setTimeout(() => inputRef.current?.focus(), 30);
+    }).then((fn) => { unlistenFocus = fn; });
+    return () => { unlistenShow?.(); unlistenFocus?.(); };
   }, []);
 
   // ESC closes from anywhere on the page
