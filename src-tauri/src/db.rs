@@ -237,3 +237,68 @@ pub fn file_count(db: &Db) -> Result<i64, String> {
     conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
         .map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) fn memory_db() -> Db {
+        let conn = Connection::open_in_memory().unwrap();
+        setup_schema(&conn).unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    fn rec(path: &str, is_dir: bool) -> FileRecord {
+        let p = std::path::Path::new(path);
+        FileRecord {
+            id: 0,
+            path: path.to_string(),
+            filename: p.file_name().unwrap().to_string_lossy().to_string(),
+            extension: if is_dir { None } else { p.extension().map(|e| e.to_string_lossy().to_lowercase()) },
+            size: None,
+            modified_time: None,
+            is_dir,
+        }
+    }
+
+    fn names(r: &[FileRecord]) -> Vec<&str> {
+        r.iter().map(|r| r.filename.as_str()).collect()
+    }
+
+    #[test]
+    fn search_substring_case_insensitive_and_filters() {
+        let db = memory_db();
+        upsert_batch(&db, &[
+            rec("/run/media/me/Kodak SSD/Holiday Photos", true),
+            rec("/run/media/me/Kodak SSD/Holiday Photos/beach.JPG", false),
+            rec("/home/me/Downloads/Quarterly Report.pdf", false),
+            rec("/home/me/Downloads/résumé final.docx", false),
+        ]).unwrap();
+
+        assert_eq!(names(&search(&db, "holiday", 50, "all").unwrap()), ["Holiday Photos"]);
+        assert_eq!(names(&search(&db, "REPORT", 50, "all").unwrap()), ["Quarterly Report.pdf"]);
+        assert_eq!(names(&search(&db, "résumé", 50, "all").unwrap()), ["résumé final.docx"]);
+        // Multi-word: every token must match
+        assert_eq!(names(&search(&db, "quart rep", 50, "all").unwrap()), ["Quarterly Report.pdf"]);
+        // Short queries fall back to LIKE
+        assert_eq!(names(&search(&db, "be", 50, "all").unwrap()), ["beach.JPG"]);
+        // Filters
+        assert_eq!(names(&search(&db, "ho", 50, "folder").unwrap()), ["Holiday Photos"]);
+        assert_eq!(names(&search(&db, "beach", 50, "image").unwrap()), ["beach.JPG"]);
+        assert!(search(&db, "beach", 50, "doc").unwrap().is_empty());
+        // Quotes and FTS operators are treated literally, not as syntax
+        assert!(search(&db, "\"OR NOT\" *", 50, "all").unwrap().is_empty());
+        assert!(search(&db, "   ", 50, "all").unwrap().is_empty());
+    }
+
+    #[test]
+    fn upsert_updates_and_remove_deletes_from_fts() {
+        let db = memory_db();
+        upsert_batch(&db, &[rec("/home/me/notes.txt", false)]).unwrap();
+        upsert_batch(&db, &[rec("/home/me/notes.txt", false)]).unwrap();
+        assert_eq!(file_count(&db).unwrap(), 1);
+        remove_paths(&db, &["/home/me/notes.txt".to_string()]).unwrap();
+        assert_eq!(file_count(&db).unwrap(), 0);
+        assert!(search(&db, "notes", 50, "all").unwrap().is_empty());
+    }
+}

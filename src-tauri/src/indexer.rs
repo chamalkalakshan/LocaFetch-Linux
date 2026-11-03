@@ -35,47 +35,7 @@ fn index_sync(db: Db, settings: Settings, status: StatusHandle) {
         s.error = None;
     });
 
-    let mut excluded: Vec<String> = settings
-        .excluded_folders
-        .iter()
-        .map(|p| normalise(p))
-        .collect();
-
-    // Always skip these high-noise dirs regardless of user settings.
-    // Entries containing ":\" are treated as path-prefix matches;
-    // everything else is a substring match anywhere in the path.
-    for always in &[
-        // Temp / low-integrity AppData
-        r"appdata\local\temp",
-        r"appdata\locallow",
-        // Browser caches
-        r"appdata\local\google\chrome",
-        r"appdata\local\microsoft\edge",
-        r"appdata\local\brave software",
-        r"appdata\roaming\mozilla",
-        // Microsoft / Office / Teams noise
-        r"appdata\local\microsoft\teams",
-        r"appdata\local\microsoft\onedrive",
-        r"appdata\local\microsoft\windows",
-        r"appdata\roaming\microsoft",
-        // UWP / Store app sandboxes
-        r"appdata\local\packages",
-        // Generic folder names - catch any "cache" or "caches" dir anywhere
-        r"\cache\",
-        r"\caches\",
-        // Dev noise
-        r"\node_modules\",
-        r"\.git\",
-        r"\__pycache__\",
-        r"\target\debug\",
-        r"\target\release\",
-        r"\.next\",
-        // Windows update staging
-        r"\$windows.~ws\",
-        r"\$windows.~bt\",
-    ] {
-        excluded.push(always.to_lowercase());
-    }
+    let excluded = Exclusions::new(&settings.excluded_folders);
 
     let mut batch: Vec<FileRecord> = Vec::with_capacity(BATCH_SIZE);
 
@@ -83,7 +43,7 @@ fn index_sync(db: Db, settings: Settings, status: StatusHandle) {
         let walker = WalkDir::new(folder)
             .follow_links(false)
             .into_iter()
-            .filter_entry(|e| !is_excluded(&e.path().to_string_lossy(), &excluded));
+            .filter_entry(|e| !excluded.matches(&e.path().to_string_lossy()));
 
         for entry in walker.flatten() {
             let path_str = entry.path().to_string_lossy().to_string();
@@ -154,27 +114,170 @@ fn index_sync(db: Db, settings: Settings, status: StatusHandle) {
     });
 }
 
-fn normalise(path: &str) -> String {
-    let lower = path.trim_end_matches(['\\', '/']).to_lowercase();
-    format!("{}\\", lower)
+/// Built-in high-noise locations skipped regardless of user settings. Matched as
+/// substrings against a normalised path (lowercase, `/` separators, trailing `/`).
+const ALWAYS_SKIP: &[&str] = &[
+    // Windows: temp / low-integrity AppData
+    "appdata/local/temp",
+    "appdata/locallow",
+    // Windows: browser caches
+    "appdata/local/google/chrome",
+    "appdata/local/microsoft/edge",
+    "appdata/local/brave software",
+    "appdata/roaming/mozilla",
+    // Windows: Microsoft / Office / Teams noise
+    "appdata/local/microsoft/teams",
+    "appdata/local/microsoft/onedrive",
+    "appdata/local/microsoft/windows",
+    "appdata/roaming/microsoft",
+    // Windows: UWP / Store app sandboxes
+    "appdata/local/packages",
+    // Windows: update staging
+    "/$windows.~ws/",
+    "/$windows.~bt/",
+    // Linux: caches, trash, browser profiles, Flatpak sandboxes, toolchains
+    "/.cache/",
+    "/.local/share/trash/",
+    "/.trash-", // per-drive trash on removable/NTFS drives (.Trash-1000)
+    // Windows system folders on NTFS drives mounted under Linux
+    "/$recycle.bin/",
+    "/system volume information/",
+    "/.mozilla/",
+    "/.config/google-chrome/",
+    "/.config/chromium/",
+    "/.config/bravesoftware/",
+    "/.var/app/",
+    "/.npm/",
+    "/.cargo/registry/",
+    "/.rustup/",
+    // Generic folder names - catch any "cache" or "caches" dir anywhere
+    "/cache/",
+    "/caches/",
+    // Dev noise
+    "/node_modules/",
+    "/.git/",
+    "/__pycache__/",
+    "/target/debug/",
+    "/target/release/",
+    "/.next/",
+];
+
+/// Folder exclusions shared by the indexer and the file watcher.
+pub(crate) struct Exclusions {
+    /// Absolute folders - match the folder itself and everything below it.
+    prefixes: Vec<String>,
+    /// Bare name patterns - match anywhere in the path.
+    patterns: Vec<String>,
 }
 
-fn is_excluded(path: &str, excluded: &[String]) -> bool {
-    let lower = path.to_lowercase();
-    let lower_slash = format!("{}\\", lower);
-    excluded.iter().any(|ex| {
-        // Drive-root exclusions: must match as a path prefix
-        if ex.contains(":\\") {
-            lower.starts_with(ex.as_str()) || lower_slash == *ex
-        } else {
-            // Bare name patterns (e.g. \node_modules\) - substring match
-            lower.contains(ex.as_str())
+impl Exclusions {
+    pub(crate) fn new(user: &[String]) -> Self {
+        let mut prefixes = Vec::new();
+        let mut patterns: Vec<String> = ALWAYS_SKIP.iter().map(|s| s.to_string()).collect();
+        for p in user {
+            let n = normalise(p);
+            if n.starts_with('/') || n.contains(":/") {
+                prefixes.push(n);
+            } else {
+                patterns.push(n);
+            }
         }
-    })
+        Self { prefixes, patterns }
+    }
+
+    pub(crate) fn matches(&self, path: &str) -> bool {
+        let p = normalise(path);
+        self.prefixes.iter().any(|ex| p.starts_with(ex.as_str()))
+            || self.patterns.iter().any(|pat| p.contains(pat.as_str()))
+    }
+}
+
+/// Lowercase, `/` separators, exactly one trailing `/` - so `C:\Foo` and
+/// `/home/me/foo` compare the same way on every platform.
+fn normalise(path: &str) -> String {
+    let mut s = path.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    s.push('/');
+    s
 }
 
 fn set_status(handle: &StatusHandle, f: impl FnOnce(&mut IndexStatus)) {
     if let Ok(mut s) = handle.lock() {
         f(&mut s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exclusions_match_linux_and_windows_paths() {
+        let e = Exclusions::new(&[
+            "/proc".into(),
+            "/home/me/Secret/".into(),
+            r"C:\Windows".into(),
+            "build".into(),
+        ]);
+        for (path, want) in [
+            ("/proc", true),
+            ("/proc/1/fd", true),
+            ("/processes", false),
+            ("/home/me/Secret", true),
+            ("/home/me/Secret/a.txt", true),
+            ("/home/me/SecretX", false),
+            ("/home/me/proj/node_modules", true),
+            ("/home/me/proj/node_modules/x/y.js", true),
+            ("/home/me/.cache/thumbnails", true),
+            ("/home/me/cachefile", false),
+            ("/home/me/.local/share/Trash/files/x", true),
+            ("/run/media/me/LAP/.Trash-1000/files/x.srt", true),
+            ("/run/media/me/LAP/System Volume Information/x", true),
+            ("/run/media/me/LAP/$RECYCLE.BIN/S-1-5/x", true),
+            ("/run/media/me/LAP/Movies/trash talk.mkv", false),
+            (r"C:\Windows\System32", true),
+            (r"C:\WindowsApps", false),
+            (r"C:\Users\me\AppData\Local\Temp\x", true),
+            ("/home/me/build/out", true),
+            ("/home/me/docs/a.pdf", false),
+        ] {
+            assert_eq!(e.matches(path), want, "{path}");
+        }
+    }
+
+    #[test]
+    fn indexes_tree_and_skips_excluded() {
+        let root = std::env::temp_dir().join(format!("locafetch-idx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["Docs/sub dir", "proj/node_modules/pkg", ".cache/thumbs", "private"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for f in ["Docs/sub dir/Report 2024.PDF", "proj/node_modules/pkg/index.js", ".cache/thumbs/a.png", "private/key.txt", "top.md"] {
+            std::fs::write(root.join(f), b"x").unwrap();
+        }
+
+        let db = crate::db::tests::memory_db();
+        let settings = Settings {
+            indexed_folders: vec![root.to_string_lossy().to_string()],
+            excluded_folders: vec![root.join("private").to_string_lossy().to_string()],
+            ..Default::default()
+        };
+        let status = StatusHandle::default();
+        index_sync(db.clone(), settings, status.clone());
+
+        let conn = db.lock().unwrap();
+        let mut paths: Vec<String> = conn
+            .prepare("SELECT path FROM files").unwrap()
+            .query_map([], |r| r.get(0)).unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&root);
+        let prefix = root.to_string_lossy().to_string();
+        paths = paths.into_iter().map(|p| p.replacen(&prefix, "", 1)).collect();
+        paths.sort();
+        assert_eq!(paths, ["", "/Docs", "/Docs/sub dir", "/Docs/sub dir/Report 2024.PDF", "/proj", "/top.md"]);
+
+        let s = status.lock().unwrap();
+        assert!(!s.is_indexing && s.last_indexed_at.is_some() && s.error.is_none());
     }
 }

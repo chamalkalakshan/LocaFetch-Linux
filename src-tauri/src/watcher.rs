@@ -1,4 +1,7 @@
-use crate::db::{upsert_batch, Db, FileRecord};
+use crate::{
+    db::{upsert_batch, Db, FileRecord},
+    indexer::Exclusions,
+};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
     collections::{HashMap, HashSet},
@@ -10,7 +13,7 @@ pub fn start(db: Db, folders: Vec<String>, user_excluded: Vec<String>) {
     if folders.is_empty() {
         return;
     }
-    let excluded = build_excluded(&user_excluded);
+    let excluded = Exclusions::new(&user_excluded);
 
     std::thread::spawn(move || {
         let (tx, rx) = channel::<notify::Result<Event>>();
@@ -62,7 +65,7 @@ pub fn start(db: Db, folders: Vec<String>, user_excluded: Vec<String>) {
 
 fn handle_event(
     event: Event,
-    excluded: &[String],
+    excluded: &Exclusions,
     pending_upsert: &mut HashMap<String, FileRecord>,
     pending_remove: &mut HashSet<String>,
 ) {
@@ -72,7 +75,7 @@ fn handle_event(
         EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(_)) => {
             for path in event.paths {
                 let s = path.to_string_lossy().to_string();
-                if is_excluded(&s, excluded) {
+                if excluded.matches(&s) {
                     continue;
                 }
                 if let Some(r) = path_to_record(&path) {
@@ -90,9 +93,18 @@ fn handle_event(
         }
         EventKind::Modify(ModifyKind::Name(RenameMode::To))
         | EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-            for path in event.paths {
+            let mut paths = event.paths;
+            // Both (inotify on Linux) carries [from, to] - the old path is gone.
+            if matches!(event.kind, EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                && paths.len() == 2
+            {
+                let from = paths.remove(0).to_string_lossy().to_string();
+                pending_upsert.remove(&from);
+                pending_remove.insert(from);
+            }
+            for path in paths {
                 let s = path.to_string_lossy().to_string();
-                if is_excluded(&s, excluded) {
+                if excluded.matches(&s) {
                     continue;
                 }
                 if let Some(r) = path_to_record(&path) {
@@ -137,48 +149,41 @@ fn path_to_record(path: &std::path::Path) -> Option<FileRecord> {
     })
 }
 
-fn build_excluded(user: &[String]) -> Vec<String> {
-    let mut v: Vec<String> = user.iter().map(|p| normalise(p)).collect();
-    for s in &[
-        r"appdata\local\temp",
-        r"appdata\locallow",
-        r"appdata\local\packages",
-        r"appdata\local\google\chrome",
-        r"appdata\local\microsoft\edge",
-        r"appdata\local\brave software",
-        r"appdata\roaming\mozilla",
-        r"appdata\local\microsoft\teams",
-        r"appdata\local\microsoft\onedrive",
-        r"appdata\local\microsoft\windows",
-        r"appdata\roaming\microsoft",
-        r"\cache\",
-        r"\caches\",
-        r"\node_modules\",
-        r"\.git\",
-        r"\__pycache__\",
-        r"\target\debug\",
-        r"\target\release\",
-        r"\.next\",
-        r"\$windows.~ws\",
-        r"\$windows.~bt\",
-    ] {
-        v.push(s.to_lowercase());
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{ModifyKind, RenameMode};
+    use std::path::PathBuf;
+
+    #[test]
+    fn rename_both_removes_old_path_and_adds_new() {
+        let dir = std::env::temp_dir().join(format!("locafetch-w-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let new = dir.join("new name.txt");
+        std::fs::write(&new, b"x").unwrap();
+        let old = dir.join("old.txt");
+
+        let mut up = HashMap::new();
+        let mut rm = HashSet::new();
+        let ev = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(old.clone())
+            .add_path(new.clone());
+        handle_event(ev, &Exclusions::new(&[]), &mut up, &mut rm);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let s = |p: &PathBuf| p.to_string_lossy().to_string();
+        assert!(rm.contains(&s(&old)));
+        assert_eq!(up.keys().cloned().collect::<Vec<_>>(), [s(&new)]);
+        assert_eq!(up[&s(&new)].filename, "new name.txt");
     }
-    v
-}
 
-fn normalise(p: &str) -> String {
-    format!("{}\\", p.trim_end_matches(['\\', '/']).to_lowercase())
-}
-
-fn is_excluded(path: &str, excluded: &[String]) -> bool {
-    let lower = path.to_lowercase();
-    let lower_slash = format!("{}\\", lower);
-    excluded.iter().any(|ex| {
-        if ex.contains(":\\") {
-            lower.starts_with(ex.as_str()) || lower_slash == *ex
-        } else {
-            lower.contains(ex.as_str())
-        }
-    })
+    #[test]
+    fn excluded_creates_are_ignored() {
+        let mut up = HashMap::new();
+        let mut rm = HashSet::new();
+        let ev = Event::new(EventKind::Create(notify::event::CreateKind::File))
+            .add_path(PathBuf::from("/home/me/proj/node_modules/x.js"));
+        handle_event(ev, &Exclusions::new(&[]), &mut up, &mut rm);
+        assert!(up.is_empty() && rm.is_empty());
+    }
 }
