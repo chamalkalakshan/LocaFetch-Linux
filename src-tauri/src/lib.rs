@@ -13,6 +13,12 @@ use indexer::IndexStatus;
 
 pub fn run() {
     tauri::Builder::default()
+        // Must be registered first. Launching the app again toggles the running
+        // instance - on Wayland, where global shortcuts can't be grabbed, bind the
+        // hotkey to the `locafetch` command in the desktop's shortcut settings.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            toggle_window(app);
+        }))
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -75,15 +81,19 @@ pub fn run() {
 
             // ── Global shortcut from settings ─────────────────────────────
             let handle = app.handle().clone();
+            // Not fatal: on Linux another program (e.g. an input method) may
+            // already own the key combination.
             if let Some(shortcut) = parse_hotkey(&cfg.hotkey) {
-                app.global_shortcut().on_shortcut(
+                if let Err(e) = app.global_shortcut().on_shortcut(
                     shortcut,
                     move |_app, _shortcut, event| {
                         if event.state() == ShortcutState::Pressed {
                             toggle_window(&handle);
                         }
                     },
-                )?;
+                ) {
+                    eprintln!("Could not register hotkey '{}': {}", cfg.hotkey, e);
+                }
             }
 
             Ok(())
@@ -214,4 +224,23 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .build(app)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hotkeys() {
+        assert_eq!(
+            parse_hotkey("ctrl+space"),
+            Some(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))
+        );
+        assert_eq!(
+            parse_hotkey("Super + Shift + F"),
+            Some(Shortcut::new(Some(Modifiers::META | Modifiers::SHIFT), Code::KeyF))
+        );
+        assert_eq!(parse_hotkey("ctrl+"), None);
+        assert_eq!(parse_hotkey("ctrl+nope"), None);
+    }
 }
