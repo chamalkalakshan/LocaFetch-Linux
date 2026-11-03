@@ -1,0 +1,23 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "LocaFetch",
+        "width": 680,
+        "height": 68,
+        "minWidth": 680,
+        "maxWidth": 680,
+        "resizable": true,
+        "center": true,
+        "decorations": false,
+        "alwaysOnTop": false,
+        "visible": false,
+        "skipTaskbar": true,
+        "transparent": false,
+        "shadow": false,
+        "focus": true
+      }
+    ]
+  }
+}
