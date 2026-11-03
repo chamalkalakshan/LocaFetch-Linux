@@ -53,11 +53,34 @@ impl Default for Settings {
     }
 }
 
-fn detect_drives() -> Vec<String> {
-    (b'C'..=b'Z')
-        .map(|l| format!("{}:\\", l as char))
-        .filter(|p| std::path::Path::new(p).exists())
-        .collect()
+/// Every local drive root (C:\, D:\, …) on Windows, `/` elsewhere.
+pub fn detect_drives() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        (b'C'..=b'Z')
+            .map(|l| format!("{}:\\", l as char))
+            .filter(|p| std::path::Path::new(p).exists())
+            .collect()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec!["/".to_string()]
+    }
+}
+
+/// Folders indexed on first run: every drive on Windows, the home folder elsewhere
+/// (indexing all of `/` is mostly system files).
+fn default_indexed_folders() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        detect_drives()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var("HOME")
+            .map(|h| vec![h])
+            .unwrap_or_else(|_| detect_drives())
+    }
 }
 
 #[allow(dead_code)]
@@ -66,7 +89,8 @@ pub fn is_first_run(app: &AppHandle) -> bool {
 }
 
 fn default_exclusions() -> Vec<String> {
-    vec![
+    #[cfg(target_os = "windows")]
+    let paths = vec![
         // Core system
         r"C:\Windows",
         r"C:\Recovery",
@@ -79,10 +103,23 @@ fn default_exclusions() -> Vec<String> {
         r"C:\Program Files (x86)",
         // System-wide app data
         r"C:\ProgramData",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    ];
+    #[cfg(not(target_os = "windows"))]
+    let paths = vec![
+        // Virtual / runtime filesystems
+        "/proc",
+        "/sys",
+        "/dev",
+        "/run/user",
+        "/tmp",
+        // System software and state - binaries and libraries, not user content
+        "/usr",
+        "/boot",
+        "/var",
+        "/snap",
+        "/lost+found",
+    ];
+    paths.into_iter().map(str::to_string).collect()
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -95,7 +132,7 @@ pub fn load(app: &AppHandle) -> Result<Settings, String> {
     let path = settings_path(app)?;
     if !path.exists() {
         let mut s = Settings::default();
-        s.indexed_folders = detect_drives();
+        s.indexed_folders = default_indexed_folders();
         // Persist immediately so the next load sees a real file.
         let data = serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?;
         std::fs::write(&path, data).map_err(|e| e.to_string())?;
