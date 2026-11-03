@@ -112,7 +112,7 @@ export default function ResultItem({ result, selected, onSelect }: Props) {
           <button className="action-btn" onClick={handleOpen} title="Open">
             Open
           </button>
-          <button className="action-btn" onClick={handleReveal} title="Reveal in Explorer">
+          <button className="action-btn" onClick={handleReveal} title="Show in folder">
             Reveal
           </button>
           <button className="action-btn" onClick={handleCopy} title="Copy path">
@@ -138,7 +138,7 @@ export default function ResultItem({ result, selected, onSelect }: Props) {
           )}
           <div className="context-separator" />
           <button className="context-item" onClick={menuAction(() => revealInExplorer(result.path))}>
-            Reveal in Explorer
+            Show in folder
           </button>
           <button className="context-item" onClick={menuAction(() => copyPath(result.path))}>
             Copy path

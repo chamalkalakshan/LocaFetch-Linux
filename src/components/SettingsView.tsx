@@ -12,6 +12,9 @@ import {
   updateHotkey,
 } from "../lib/api";
 
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+const META_LABEL = IS_WINDOWS ? "Win" : navigator.userAgent.includes("Mac") ? "Cmd" : "Super";
+
 interface Props {
   onBack: () => void;
   theme: "dark" | "light";
@@ -113,7 +116,7 @@ export default function SettingsView({ onBack, theme, onThemeChange }: Props) {
   function formatHotkey(h: string): string {
     return h.split("+").map(k =>
       k === "ctrl" ? "Ctrl" : k === "alt" ? "Alt" :
-      k === "shift" ? "Shift" : k === "meta" ? "Win" :
+      k === "shift" ? "Shift" : k === "meta" ? META_LABEL :
       k === "space" ? "Space" : k.toUpperCase()
     ).join(" + ");
   }
@@ -319,7 +322,7 @@ export default function SettingsView({ onBack, theme, onThemeChange }: Props) {
             <button className="add-btn" style={{ flex: 1 }} onClick={addIndexedFolder}>
               <span>＋</span> Add folder
             </button>
-            <button className="add-btn" style={{ flex: 1 }} onClick={addAllDrives} title="Add every drive root (C:\, D:\, …)">
+            <button className="add-btn" style={{ flex: 1 }} onClick={addAllDrives} title={IS_WINDOWS ? "Add every drive root (C:\\, D:\\, …)" : "Add the filesystem root (/)"}>
               <span>💾</span> Add all drives
             </button>
           </div>
@@ -354,7 +357,7 @@ export default function SettingsView({ onBack, theme, onThemeChange }: Props) {
         </button>
         <span className="indexing-status">
           {isIndexing
-            ? `${status?.files_indexed.toLocaleString()} files… ${status?.current_path.split("\\").pop() ?? ""}`
+            ? `${status?.files_indexed.toLocaleString()} files… ${status?.current_path.split(/[\\/]/).pop() ?? ""}`
             : fileCount > 0
             ? `${fileCount.toLocaleString()} files in index`
             : settings.indexed_folders.length === 0

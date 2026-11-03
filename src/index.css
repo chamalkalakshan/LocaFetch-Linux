@@ -53,6 +53,13 @@ html, body {
   flex-direction: column;
 }
 
+/* Opaque window (Linux): fill it edge to edge - rounded corners would show
+   the window background behind them. */
+.opaque-window .app {
+  border-radius: 0;
+  min-height: 100vh;
+}
+
 /* ── Expanding results panel ──────────────────────────────────────────────── */
 .results-panel {
   overflow: hidden;
